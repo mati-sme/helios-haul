@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#0a1224">
+  <meta name="description" content="Helios Haul — a dark sci-fi space incremental. Fly, blast asteroids, haul scrap, upgrade and ascend.">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" type="image/png" href="icons/icon-192.png">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <link rel="stylesheet" href="style.css">
+  <title>Helios Haul</title>
+</head>
+<body>
+  <canvas id="stage" aria-label="Helios Haul game view"></canvas>
+
+  <!-- in-run HUD -->
+  <div id="hud" class="hud" hidden>
+    <div class="hud-top">
+      <div class="chip" id="hud-scrap"><span class="ic">◆</span><b>0</b></div>
+      <div class="chip timer" id="hud-time"><b>2:00</b></div>
+      <div class="hud-btns">
+        <button id="btn-pause" class="ibtn" aria-label="Pause">❚❚</button>
+        <button id="btn-mute" class="ibtn" aria-label="Mute">🔊</button>
+      </div>
+    </div>
+    <div class="bars">
+      <div class="bar shield" id="bar-shield"><i></i><span></span></div>
+      <div class="bar hull" id="bar-hull"><i></i><span></span></div>
+    </div>
+    <div id="banner" class="banner" aria-live="polite"></div>
+    <div id="hint" class="hint">Drag in the bottom-left to fly. Your ship fires on its own.</div>
+  </div>
+
+  <!-- hangar -->
+  <div id="app" class="app">
+    <header class="topbar">
+      <div class="logo"><span class="sun"></span><b>HELIOS</b> HAUL</div>
+      <div class="wallet">
+        <div class="chip gold" title="Credits"><span class="ic">◆</span><b id="w-credits">0</b></div>
+        <div class="chip sun" title="Solar Marks"><span class="ic">☀</span><b id="w-marks">0</b></div>
+      </div>
+    </header>
+
+    <main class="panels">
+      <!-- HOME -->
+      <section id="tab-home" class="tab active" data-tab="home">
+        <div class="scroll">
+          <div class="card launch">
+            <div class="eyebrow" id="mode-line">Standard run · 2:00</div>
+            <h1>Mothership Hangar</h1>
+            <p class="muted">Fly out, blast rocks, scoop scrap, cash out. Then upgrade and do it bigger.</p>
+            <button id="btn-launch" class="btn big primary">LAUNCH RUN</button>
+            <div id="last-run" class="lastrun muted"></div>
+          </div>
+
+          <div class="card" id="goal-card">
+            <div class="eyebrow">Current goal</div>
+            <div id="goal-body"></div>
+          </div>
+
+          <div class="card">
+            <div class="eyebrow">Loadout</div>
+            <div class="lo-title">Weapon</div>
+            <div id="lo-weapon" class="chips"></div>
+            <div class="lo-title">Engine trail</div>
+            <div id="lo-trail" class="chips"></div>
+            <div class="lo-title">HUD tint</div>
+            <div id="lo-hud" class="chips"></div>
+          </div>
+
+          <div class="card">
+            <div class="eyebrow">Fleet log</div>
+            <div id="stats-grid" class="stats"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- UPGRADES -->
+      <section id="tab-upgrades" class="tab" data-tab="upgrades">
+        <div id="upg-tree" class="tree-host" tabindex="0" aria-label="Upgrade map"></div>
+        <div class="tree-hint">Drag to pan · pinch to zoom · tap a node</div>
+        <div class="tree-tools">
+          <button class="ibtn" data-zoom="in" aria-label="Zoom in">+</button>
+          <button class="ibtn" data-zoom="out" aria-label="Zoom out">−</button>
+          <button class="ibtn" data-zoom="home" aria-label="Recenter">◎</button>
+        </div>
+      </section>
+
+      <!-- PRESTIGE -->
+      <section id="tab-prestige" class="tab" data-tab="prestige">
+        <div id="pre-tree" class="tree-host" tabindex="0" aria-label="Prestige map"></div>
+        <div class="asc-bar">
+          <div class="asc-info">
+            <div class="eyebrow">Ascension</div>
+            <div id="asc-text" class="asc-text"></div>
+          </div>
+          <button id="btn-ascend" class="btn gold">ASCEND</button>
+        </div>
+        <div class="tree-hint">Drag to pan · pinch to zoom · tap a star</div>
+        <div class="tree-tools">
+          <button class="ibtn" data-zoom="in" aria-label="Zoom in">+</button>
+          <button class="ibtn" data-zoom="out" aria-label="Zoom out">−</button>
+          <button class="ibtn" data-zoom="home" aria-label="Recenter">◎</button>
+        </div>
+      </section>
+
+      <!-- PETS -->
+      <section id="tab-pets" class="tab" data-tab="pets">
+        <div class="scroll">
+          <div class="card">
+            <div class="eyebrow">Companions</div>
+            <p class="muted">Pets wander the galaxy on their own. They never fight, but their glow gives a tiny scrap-magnet and luck aura while they are near your ship.</p>
+            <div id="pet-slots" class="slotline"></div>
+          </div>
+          <div id="pet-list" class="petlist"></div>
+        </div>
+      </section>
+
+      <!-- SETTINGS -->
+      <section id="tab-settings" class="tab" data-tab="settings">
+        <div class="scroll">
+          <div class="card">
+            <div class="eyebrow">Play</div>
+            <label class="row"><span><b>Kids Mode</b><small>Longer 3:00 timer, slower enemy shots, bigger magnet.</small></span><input type="checkbox" id="set-kids" class="switch"></label>
+            <div class="row col"><span><b>Joystick side</b><small>The invisible stick appears wherever you touch in this area.</small></span>
+              <div class="seg" id="set-side"><button data-v="left">Bottom-left</button><button data-v="right">Bottom-right</button></div>
+            </div>
+          </div>
+          <div class="card">
+            <div class="eyebrow">Sound</div>
+            <label class="row"><span><b>Sound effects</b></span><input type="checkbox" id="set-sound" class="switch"></label>
+            <label class="row"><span><b>Ambient music</b></span><input type="checkbox" id="set-music" class="switch"></label>
+            <label class="row col"><span><b>Volume</b></span><input type="range" id="set-vol" min="0" max="100" step="5"></label>
+          </div>
+          <div class="card">
+            <div class="eyebrow">Save data</div>
+            <p class="muted">Progress is stored in this browser. Export a backup to move it to another device.</p>
+            <div class="btnrow">
+              <button id="btn-export" class="btn">Export file</button>
+              <button id="btn-copy" class="btn">Copy JSON</button>
+              <button id="btn-import-file" class="btn">Import file</button>
+            </div>
+            <input type="file" id="file-import" accept="application/json,.json" hidden>
+            <textarea id="save-text" rows="4" placeholder="Paste exported JSON here, then press Import pasted." spellcheck="false"></textarea>
+            <div class="btnrow">
+              <button id="btn-import-text" class="btn">Import pasted</button>
+              <button id="btn-reset" class="btn danger">Erase save</button>
+            </div>
+          </div>
+          <div class="card about">
+            <div class="eyebrow">About</div>
+            <p class="muted">Helios Haul v<span id="ver"></span>. Everything runs offline in your browser. No accounts, no tracking.</p>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <nav class="tabbar" id="tabbar">
+      <button data-go="home" class="on"><span>⌂</span>Home</button>
+      <button data-go="upgrades"><span>⬢</span>Upgrades</button>
+      <button data-go="prestige"><span>☀</span>Prestige</button>
+      <button data-go="pets"><span>❖</span>Pets</button>
+      <button data-go="settings"><span>⚙</span>Settings</button>
+    </nav>
+  </div>
+
+  <!-- node sheet -->
+  <div id="sheet" class="sheet" hidden>
+    <div class="sheet-card">
+      <div class="sheet-head">
+        <div class="sheet-glyph" id="sh-glyph"></div>
+        <div><div class="eyebrow" id="sh-branch"></div><h2 id="sh-name"></h2></div>
+      </div>
+      <p id="sh-desc" class="muted"></p>
+      <ul id="sh-fx" class="fxlist"></ul>
+      <div id="sh-req" class="req"></div>
+      <div class="sheet-btns">
+        <button id="sh-close" class="btn">Close</button>
+        <button id="sh-buy" class="btn primary"></button>
+      </div>
+    </div>
+  </div>
+
+  <!-- pause -->
+  <div id="pause" class="overlay" hidden>
+    <div class="modal">
+      <h2>Paused</h2>
+      <p class="muted">Scrap on board is cashed out if you leave.</p>
+      <button id="pause-resume" class="btn big primary">Resume</button>
+      <button id="pause-quit" class="btn">Cash out &amp; leave</button>
+    </div>
+  </div>
+
+  <!-- run summary -->
+  <div id="summary" class="overlay" hidden>
+    <div class="modal summary">
+      <div class="eyebrow" id="sum-reason"></div>
+      <h2 id="sum-title">Run complete</h2>
+      <div class="sum-grid" id="sum-grid"></div>
+      <div class="sum-credits"><span>Credits earned</span><b id="sum-credits">0</b></div>
+      <div id="sum-note" class="muted"></div>
+      <div class="btnrow">
+        <button id="sum-again" class="btn primary big">Fly again</button>
+        <button id="sum-hangar" class="btn big">Hangar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- confirm -->
+  <div id="confirm" class="overlay" hidden>
+    <div class="modal">
+      <h2 id="cf-title"></h2>
+      <p id="cf-text" class="muted"></p>
+      <div class="btnrow">
+        <button id="cf-no" class="btn big">Cancel</button>
+        <button id="cf-yes" class="btn big gold">Confirm</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <script src="js/data.js"></script>
+  <script src="js/save.js"></script>
+  <script src="js/audio.js"></script>
+  <script src="js/input.js"></script>
+  <script src="js/tree.js"></script>
+  <script src="js/game.js"></script>
+  <script src="js/render.js"></script>
+  <script src="js/main.js"></script>
+</body>
+</html>
