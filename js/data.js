@@ -3,8 +3,40 @@
   'use strict';
   var HH = window.HH = window.HH || {};
 
-  HH.VERSION = '1.0.0';
-  HH.SAVE_KEY = 'helios-haul-save-v1';
+  HH.VERSION = '2.0.0';
+  HH.SAVE_KEY = 'helios-haul-save-v1';          // same key as v1: the v2 loader migrates in place
+  HH.SAVE_BACKUP_KEY = 'helios-haul-save-v1-backup';
+  HH.UNCAPPED = 1000;                            // node.max >= this reads as "no cap" in the UI
+
+  /* ---------- economy tunables (the sim tunes these) ---------- */
+  HH.ECON = {
+    hpLin: 0.04, hpPow: 0.85,           // hpScale   = (1 + hpLin * levels) ^ hpPow     (enemy HP, levels only)
+    valS0: 400, valGamma: 0.3,         // valueScale = (1 + spentThisAscension / valS0) ^ valGamma: sub-linear, so it never runs away or walls
+    fxK: 1,                             // scale on the node-sum income effects (scrapValue, creditMult, ...)
+    rankStep: 10, rankBonus: 0.03,      // Fleet Rank: every rankStep levels => +rankBonus credits
+    markBonus: 0.3, markExp: 0.4,      // credits x (1 + markBonus * lifetimeMarks ^ markExp): every mark always adds, with mild diminishing returns
+    markDiv: 100000, markPow: 0.5,        // marks = (ascEarned / markDiv) ^ markPow
+    carryFrac: 0.8,                    // share of this ascension's earnings handed back as starting credits
+    idleBase: 0.25, idleFloor: 6, idleW: 0.9,     // hangar salvage: min credits/sec, base share of best cpm
+    offlineCapH: 8, offlineEff: 0.6,    // base offline cap (hours) and efficiency
+    costK: 1, costLin: 0, costExp: 0, costW: 1.0, costBase: 5, oneOffK: 1, costMarks: 0.4,               // cost growth: (costMul-1)*costK, plus a global (1 + costLin*levels)
+    timerCap: 45,                       // max seconds the run timer nodes can add (diminishing returns)
+    questRunsMin: 1, questRunsMax: 3
+  };
+  HH.MILESTONES = [10, 25, 50, 100, 150, 200, 300, 400, 500, 700, 1000];
+  HH.MS_KEYS = ['damage', 'fireRate', 'hull', 'shield', 'scrapValue', 'creditMult', 'scrapMult', 'droneValue',
+    'bossValue', 'oreMult', 'tierValue', 'idleMult'];
+  // number of x2 milestones reached at a level
+  HH.msCount = function (lv) {
+    var n = 0, i, M = HH.MILESTONES;
+    for (i = 0; i < M.length && lv >= M[i]; i++) n++;
+    return n;
+  };
+  HH.nextMilestone = function (lv) {
+    var i, M = HH.MILESTONES;
+    for (i = 0; i < M.length; i++) if (lv < M[i]) return M[i];
+    return 0;
+  };
 
   /* ---------- cosmetics & pets ---------- */
   HH.TRAILS = {
@@ -77,15 +109,19 @@
     trail:        function (v) { return 'Unlocks ' + (HH.TRAILS[v] ? HH.TRAILS[v].name : v) + ' trail'; },
     hud:          function (v) { return 'Unlocks ' + (HH.HUDS[v] ? HH.HUDS[v].name : v) + ' HUD tint'; },
     pet:          function (v) { return 'Adopts ' + (HH.PETS[v] ? HH.PETS[v].name : v); },
-    unlock:       function (v) { return 'Opens ' + v + ' sector'; }
+    unlock:       function (v) { return 'Opens ' + v + ' sector'; },
+    salvage:      function (v) { return '+' + pct(v) + ' hangar salvage efficiency'; },
+    idleMult:     function (v) { return '+' + pct(v) + ' salvage income'; },
+    offlineHours: function (v) { return '+' + v + 'h offline salvage cap'; }
   };
+  var INCOME_KEYS = ['scrapValue', 'scrapMult', 'creditMult', 'tierValue', 'oreMult', 'droneValue', 'bossValue', 'idleMult'];
   HH.fxLines = function (fx, mult) {
     var out = [], k, v;
     mult = mult || 1;
     for (k in fx) {
       if (!Object.prototype.hasOwnProperty.call(fx, k) || !FX_LABEL[k]) continue;
       v = fx[k];
-      if (typeof v === 'number') v = Math.round(v * mult * 1000) / 1000;
+      if (typeof v === 'number') v = Math.round(v * mult * (INCOME_KEYS.indexOf(k) >= 0 ? HH.ECON.fxK : 1) * 1000) / 1000;
       out.push(FX_LABEL[k](v));
     }
     return out;
@@ -110,65 +146,92 @@
     shield:   { name: 'Shield',      color: '#6aa8ff', glyph: '◈' },
     value:    { name: 'Asteroid Value', color: '#ffd45e', glyph: '◆' },
     timer:    { name: 'Run Timer',   color: '#5effc2', glyph: '◷' },
+    salvage:  { name: 'Salvage',     color: '#9fe8ff', glyph: '❂' },
     pets:     { name: 'Pets',        color: '#ff8fd1', glyph: '❖' },
-    qol:      { name: 'Systems',     color: '#e6f1ff', glyph: '⚙' }
+    qol:      { name: 'Systems',     color: '#e6f1ff', glyph: '⚙' },
+    field:    { name: 'Sector Field', color: '#ffa86a', glyph: '☄' }
   };
   HH.UPG_BRANCHES = UBR;
 
+  var UN = HH.UNCAPPED;
   // id, name, branch, [angle, step], cost, max, costMul, fx, req, desc
+  // (v1 ids are all kept; every max is >= its v1 max so old saves stay valid)
   var U = [
-    ['hull1', 'Plating', 'hull', [-90, 0], 20, 5, 1.55, { hull: 25 }, [], 'Bolt-on plates to shrug off bumps.'],
-    ['hull2', 'Reinforced Ribs', 'hull', [-90, 1], 220, 4, 1.7, { hull: 40 }, ['hull1'], 'Cross-braced frame, tougher hull.'],
-    ['hull3', 'Ceramic Weave', 'hull', [-90, 2], 1800, 3, 2.0, { hull: 80 }, ['hull2'], 'Layered ceramic skin.'],
-    ['hull4', 'Bulwark Core', 'hull', [-90, 3], 15000, 2, 3.0, { hull: 150 }, ['hull3'], 'A reactor-grade armor core.'],
+    ['hull1', 'Plating', 'hull', [-90, 0], 20, UN, 1.13, { hull: 25 }, [], 'Bolt-on plates to shrug off bumps.'],
+    ['hull2', 'Reinforced Ribs', 'hull', [-90, 1], 250, UN, 1.14, { hull: 40 }, ['hull1'], 'Cross-braced frame, tougher hull.'],
+    ['hull3', 'Ceramic Weave', 'hull', [-90, 2], 2500, UN, 1.15, { hull: 80 }, ['hull2'], 'Layered ceramic skin.'],
+    ['hull4', 'Bulwark Core', 'hull', [-90, 3], 25000, UN, 1.16, { hull: 150 }, ['hull3'], 'A reactor-grade armor core.'],
+    ['hull5', 'Graphene Lattice', 'hull', [-90, 4], 350000, UN, 1.17, { hull: 300 }, ['hull4'], 'One-atom-thick, impossibly strong.'],
 
-    ['thr1', 'Ion Nozzles', 'thrust', [-57, 0], 25, 5, 1.5, { thrust: 0.08 }, [], 'Cleaner burn, snappier ship.'],
-    ['thr2', 'Vector Fins', 'thrust', [-57, 1], 300, 4, 1.65, { thrust: 0.10 }, ['thr1'], 'Steer harder into the turn.'],
-    ['thr3', 'Afterburner Coils', 'thrust', [-57, 2], 2500, 3, 1.9, { thrust: 0.15 }, ['thr2'], 'Burst of extra push.'],
-    ['thr4', 'Inertial Dampers', 'thrust', [-57, 3], 18000, 2, 3.0, { thrust: 0.22 }, ['thr3'], 'Fly fast, stop faster.'],
+    ['thr1', 'Ion Nozzles', 'thrust', [-57, 0], 25, 10, 1.3, { thrust: 0.08 }, [], 'Cleaner burn, snappier ship.'],
+    ['thr2', 'Vector Fins', 'thrust', [-57, 1], 300, 8, 1.35, { thrust: 0.10 }, ['thr1'], 'Steer harder into the turn.'],
+    ['thr3', 'Afterburner Coils', 'thrust', [-57, 2], 2500, 6, 1.4, { thrust: 0.15 }, ['thr2'], 'Burst of extra push.'],
+    ['thr4', 'Inertial Dampers', 'thrust', [-57, 3], 18000, 5, 1.5, { thrust: 0.22 }, ['thr3'], 'Fly fast, stop faster.'],
+    ['thr5', 'Warp Gimbals', 'thrust', [-57, 4], 250000, 4, 1.6, { thrust: 0.30 }, ['thr4'], 'Vectored thrust, almost no drift.'],
 
-    ['can1', 'Focused Bolts', 'cannon', [-24, 0], 15, 8, 1.5, { damage: 0.12 }, [], 'Tighter beams hit harder.'],
-    ['can2', 'Rapid Coils', 'cannon', [-24, 1], 40, 8, 1.55, { fireRate: 0.10 }, ['can1'], 'Cycle the cannons faster.'],
-    ['can5', 'Overcharged Cells', 'cannon', [-24, 2], 3500, 6, 1.7, { damage: 0.20 }, ['can3'], 'More punch per shot.'],
-    ['can6', 'Overclock Gate', 'cannon', [-24, 3], 6000, 5, 1.7, { fireRate: 0.15 }, ['can4'], 'Run the cannons hot.'],
-    ['can8', 'Singularity Rounds', 'cannon', [-24, 4], 60000, 3, 2.6, { damage: 0.30 }, ['can7'], 'Rounds that fold space.'],
+    ['can1', 'Focused Bolts', 'cannon', [-24, 0], 15, UN, 1.11, { damage: 0.12 }, [], 'Tighter beams hit harder.'],
+    ['can2', 'Rapid Coils', 'cannon', [-24, 1], 40, UN, 1.12, { fireRate: 0.10 }, ['can1'], 'Cycle the cannons faster.'],
+    ['can5', 'Overcharged Cells', 'cannon', [-24, 2], 2500, UN, 1.13, { damage: 0.20 }, ['can3'], 'More punch per shot.'],
+    ['can6', 'Overclock Gate', 'cannon', [-24, 3], 6000, UN, 1.14, { fireRate: 0.15 }, ['can4'], 'Run the cannons hot.'],
+    ['can8', 'Singularity Rounds', 'cannon', [-24, 4], 60000, UN, 1.15, { damage: 0.30 }, ['can7'], 'Rounds that fold space.'],
     ['can3', 'Twin Emitter', 'cannon', [8, 1], 600, 3, 3.0, { multishot: 1 }, ['can2'], 'One more bolt per volley.'],
     ['can4', 'Piercing Lens', 'cannon', [-6, 2], 900, 2, 3.0, { pierce: 1 }, ['can2'], 'Shots slice through a target.'],
     ['can7', 'Triple Array', 'cannon', [8, 3], 25000, 2, 3.5, { multishot: 1 }, ['can5'], 'Another emitter online.'],
+    ['can9', 'Fusion Lances', 'cannon', [-40.5, 3], 150000, UN, 1.15, { damage: 0.45 }, ['can5'], 'Star-core energy down the barrel.'],
+    ['can10', 'Quantum Coils', 'cannon', [-40.5, 4], 1800000, UN, 1.16, { fireRate: 0.25 }, ['can9'], 'Fire before the last shot lands.'],
+    ['can11', 'Antimatter Core', 'cannon', [-10, 4], 9000000, UN, 1.16, { damage: 0.90 }, ['can8'], 'Annihilation, on demand.'],
 
-    ['mag1', 'Scoop Field', 'magnet', [42, 0], 18, 6, 1.5, { magnet: 0.20 }, [], 'Pull scrap in from further away.'],
-    ['mag2', 'Grav Lens', 'magnet', [42, 1], 350, 5, 1.6, { magnet: 0.25 }, ['mag1'], 'Focused gravity.'],
-    ['mag3', 'Tractor Spine', 'magnet', [42, 2], 4000, 3, 1.9, { magnet: 0.40 }, ['mag2'], 'A long reach tractor.'],
-    ['mag4', 'Event Horizon', 'magnet', [42, 3], 40000, 2, 3.0, { magnet: 0.60 }, ['mag3'], 'Nothing escapes.'],
+    ['mag1', 'Scoop Field', 'magnet', [42, 0], 18, 6, 1.4, { magnet: 0.20 }, [], 'Pull scrap in from further away.'],
+    ['mag2', 'Grav Lens', 'magnet', [42, 1], 350, 5, 1.5, { magnet: 0.25 }, ['mag1'], 'Focused gravity.'],
+    ['mag3', 'Tractor Spine', 'magnet', [42, 2], 4000, 3, 1.7, { magnet: 0.40 }, ['mag2'], 'A long reach tractor.'],
+    ['mag4', 'Event Horizon', 'magnet', [42, 3], 40000, 2, 2.2, { magnet: 0.60 }, ['mag3'], 'Nothing escapes.'],
 
-    ['luk1', 'Lucky Charm', 'luck', [75, 0], 60, 5, 1.7, { luck: 0.05 }, [], 'More gems and crits.'],
-    ['luk2', "Prospector's Eye", 'luck', [75, 1], 500, 5, 1.7, { oreChance: 0.04 }, ['luk1'], 'Spot rare ore veins.'],
-    ['luk3', 'Stardust Sense', 'luck', [75, 2], 5000, 4, 1.9, { luck: 0.08 }, ['luk2'], 'Fortune follows the bold.'],
-    ['luk4', 'Fortune Engine', 'luck', [75, 3], 50000, 3, 2.4, { luck: 0.12, oreChance: 0.03 }, ['luk3'], 'Probability, tuned.'],
+    ['luk1', 'Lucky Charm', 'luck', [75, 0], 60, 12, 1.3, { luck: 0.05 }, [], 'More gems and crits.'],
+    ['luk2', "Prospector's Eye", 'luck', [75, 1], 500, 10, 1.35, { oreChance: 0.04 }, ['luk1'], 'Spot rare ore veins.'],
+    ['luk3', 'Stardust Sense', 'luck', [75, 2], 5000, 8, 1.4, { luck: 0.08 }, ['luk2'], 'Fortune follows the bold.'],
+    ['luk4', 'Fortune Engine', 'luck', [75, 3], 50000, 6, 1.5, { luck: 0.12, oreChance: 0.03 }, ['luk3'], 'Probability, tuned.'],
 
-    ['shd1', 'Deflector', 'shield', [108, 0], 90, 5, 1.6, { shield: 20 }, [], 'A shield that recharges when safe.'],
-    ['shd2', 'Capacitor Bank', 'shield', [108, 1], 900, 4, 1.7, { shield: 30, shieldRegen: 0.5 }, ['shd1'], 'Bigger buffer, faster recharge.'],
-    ['shd3', 'Phase Mantle', 'shield', [108, 2], 9000, 3, 2.0, { shield: 60 }, ['shd2'], 'Phase-shifted barrier.'],
-    ['shd4', 'Aegis Matrix', 'shield', [108, 3], 60000, 2, 3.0, { shield: 100, shieldRegen: 1 }, ['shd3'], 'Legendary shield lattice.'],
+    ['shd1', 'Deflector', 'shield', [108, 0], 90, 20, 1.2, { shield: 20 }, [], 'A shield that recharges when safe.'],
+    ['shd2', 'Capacitor Bank', 'shield', [108, 1], 900, 15, 1.25, { shield: 30, shieldRegen: 0.5 }, ['shd1'], 'Bigger buffer, faster recharge.'],
+    ['shd3', 'Phase Mantle', 'shield', [108, 2], 9000, 10, 1.3, { shield: 60 }, ['shd2'], 'Phase-shifted barrier.'],
+    ['shd4', 'Aegis Matrix', 'shield', [108, 3], 60000, 8, 1.4, { shield: 100, shieldRegen: 1 }, ['shd3'], 'Legendary shield lattice.'],
 
-    ['val1', 'Sharper Assay', 'value', [141, 0], 30, 8, 1.55, { scrapValue: 0.12 }, [], 'Rocks drop richer scrap.'],
-    ['val2', 'Smelter Link', 'value', [141, 1], 700, 6, 1.6, { scrapValue: 0.15 }, ['val1'], 'Better refining on the fly.'],
-    ['val5', 'Refinery Contracts', 'value', [141, 2], 8000, 5, 1.8, { scrapValue: 0.20 }, ['val2'], 'Long-term buyer deals.'],
-    ['val3', 'Drone Bounty', 'value', [158, 1], 1200, 4, 1.8, { droneValue: 0.25 }, ['val1'], 'Scavengers carry a reward.'],
-    ['val4', 'Boss Bounty', 'value', [160, 2], 2000, 4, 1.9, { bossValue: 0.30 }, ['val3'], 'Big rocks, big payouts.'],
+    ['val1', 'Sharper Assay', 'value', [141, 0], 30, UN, 1.11, { scrapValue: 0.12 }, [], 'Rocks drop richer scrap.'],
+    ['val2', 'Smelter Link', 'value', [141, 1], 600, UN, 1.12, { scrapValue: 0.15 }, ['val1'], 'Better refining on the fly.'],
+    ['val5', 'Refinery Contracts', 'value', [141, 2], 8000, UN, 1.13, { scrapValue: 0.20 }, ['val2'], 'Long-term buyer deals.'],
+    ['val8', 'Crystal Futures', 'value', [141, 3], 90000, UN, 1.14, { tierValue: 0.30 }, ['val5'], 'Pre-sell crystal and obsidian hauls.'],
+    ['val9', 'Galactic Exchange', 'value', [141, 4], 900000, UN, 1.15, { scrapMult: 0.25 }, ['val8'], 'List your scrap across the arm.'],
+    ['val3', 'Drone Bounty', 'value', [158, 1], 1200, UN, 1.13, { droneValue: 0.25 }, ['val1'], 'Scavengers carry a reward.'],
+    ['val4', 'Boss Bounty', 'value', [160, 2], 2000, UN, 1.14, { bossValue: 0.30 }, ['val3'], 'Big rocks, big payouts.'],
+    ['val11', 'Dyson Brokerage', 'value', [158, 3], 5000000, UN, 1.15, { scrapValue: 0.40 }, ['val4'], 'A swarm of brokers around the sun.'],
+    ['val12', 'Stellar Treasury', 'value', [160, 4], 60000000, UN, 1.16, { creditMult: 0.30 }, ['val11'], 'Banking at stellar scale.'],
+    ['val6', 'Futures Desk', 'value', [124.5, 2], 3500, UN, 1.13, { creditMult: 0.08 }, ['val2'], 'Better rates on every cash-out.'],
+    ['val7', 'Ore Contracts', 'value', [124.5, 3], 35000, UN, 1.14, { oreMult: 0.25 }, ['val6'], 'Rare ore sells high.'],
+    ['val10', 'Sun Bonds', 'value', [124.5, 4], 1500000, UN, 1.15, { creditMult: 0.20 }, ['val7'], 'Bonds backed by the sun itself.'],
 
     ['tim1', 'Fuel Tanks', 'timer', [174, 0], 120, 5, 1.8, { runTime: 6 }, [], 'Stay out in the field longer.'],
     ['tim2', 'Hot Swap Cells', 'timer', [174, 1], 1500, 4, 2.0, { runTime: 8 }, ['tim1'], 'Swap batteries mid-flight.'],
     ['tim3', 'Chrono Lens', 'timer', [174, 2], 14000, 3, 2.6, { runTime: 10 }, ['tim2'], 'Stretch the final minutes.'],
+    ['tim4', 'Time Crystal', 'timer', [174, 3], 150000, 3, 3.0, { runTime: 12 }, ['tim3'], 'A second of crystal, a minute of fuel.'],
+
+    ['sal1', 'Salvage Drones', 'salvage', [190.5, 1], 100, 25, 1.22, { salvage: 0.02 }, [], 'Little drones work the hangar while you rest.'],
+    ['sal2', 'Auto-Refinery', 'salvage', [190.5, 2], 2000, UN, 1.14, { idleMult: 0.15 }, ['sal1'], 'Hangar salvage pays more.'],
+    ['sal3', 'Deep Storage', 'salvage', [190.5, 3], 12000, 16, 1.3, { offlineHours: 1 }, ['sal2'], 'Salvage keeps piling up for longer while away.'],
+    ['sal4', 'Orbital Foundry', 'salvage', [190.5, 4], 800000, UN, 1.16, { idleMult: 0.50 }, ['sal3'], 'A foundry in orbit never sleeps.'],
 
     ['pet1', 'Pet Bay', 'pets', [207, 0], 400, 1, 1, { petSlots: 1, pet: 'pipflare' }, [], 'Adopt Pipflare, who wanders on its own.'],
     ['pet2', 'Dustmoth Cage', 'pets', [207, 1], 3000, 1, 1, { pet: 'dustmoth' }, ['pet1'], 'A moth that loves stardust.'],
     ['pet3', 'Second Perch', 'pets', [207, 2], 9000, 1, 1, { petSlots: 1 }, ['pet2'], 'Room for another escort.'],
+    ['pet4', 'Companion Bond', 'pets', [207, 3], 60000, 6, 1.6, { petAura: 0.2 }, ['pet3'], 'Pets glow brighter, auras grow.'],
 
-    ['qol1', 'Repair Kit', 'qol', [240, 0], 150, 5, 1.7, { regen: 0.4 }, [], 'Slow hull regeneration.'],
+    ['qol1', 'Repair Kit', 'qol', [240, 0], 150, 12, 1.3, { regen: 0.4 }, [], 'Slow hull regeneration.'],
     ['qol2', 'Compass', 'qol', [240, 1], 800, 1, 1, { compass: 1 }, ['qol1'], 'Arrow toward bosses and rare ore.'],
     ['qol3', 'Cargo Scanner', 'qol', [222, 2], 1800, 1, 1, { scanner: 1 }, ['qol2'], 'Rare ore glints on your map.'],
-    ['anchor', 'Solar Anchor', 'qol', [255, 4], 12000, 1, 1, { anchor: 1 }, ['can5', 'val2'], 'Moor your fleet to the sun. Unlocks Ascension.']
+    ['anchor', 'Solar Anchor', 'qol', [255, 4], 1600000, 1, 1, { anchor: 1 }, [], 'Moor your fleet to the sun. Unlocks Ascension.'],
+
+    ['spn1', 'Dense Field', 'field', [58.5, 2], 5000, 15, 1.3, { spawn: 0.06 }, ['mag2'], 'More asteroids drift into range.'],
+    ['spn2', 'Drone Lure', 'field', [58.5, 3], 20000, 10, 1.35, { droneRate: 0.10 }, ['spn1'], 'More scavenger drones to pop.'],
+    ['spn3', 'Crate Beacon', 'field', [91.5, 3], 50000, 10, 1.35, { crateRate: 0.10 }, ['luk3'], 'More cargo crates drift by.']
   ];
 
   HH.UPGRADES = U.map(function (a) {
@@ -286,6 +349,9 @@
   ];
   HH.PRE_BRANCHES = PB.map(function (b) { return { id: b.id, name: b.name, glyph: b.glyph, color: b.color }; });
 
+  // v2 rescale: cheap nodes stay cheap, late nodes grow (cost x cost/28) so the map keeps giving purchases for ~10 h
+  function preCost(c) { return Math.round(c * Math.max(1, c / 28)); }
+
   HH.PRESTIGE = (function () {
     var out = [{
       id: 'core', name: 'Helios Core', branch: 'core', x: 50, y: 3, cost: 1, max: 1, costMul: 1,
@@ -303,7 +369,7 @@
           id: id, name: n[0], desc: n[1], branch: b.id,
           x: Math.min(95, Math.max(5, BRANCH_X[bi] + pat[0])),
           y: 12 + pat[1] * 13,
-          cost: n[2], max: 1, costMul: 1, fx: n[3], req: req
+          cost: preCost(n[2]), max: 1, costMul: 1, fx: n[3], req: req
         });
       });
     });
@@ -328,11 +394,45 @@
 
   HH.fmt = function (n) {
     n = Math.floor(n);
+    if (!isFinite(n)) return '∞';
     if (n < 10000) return String(n);
-    var u = ['', 'K', 'M', 'B', 'T', 'Qa'], i = 0, v = n;
-    while (v >= 1000 && i < u.length - 1) { v /= 1000; i++; }
+    var u = ['', 'K', 'M', 'B', 'T', 'Qa', 'Qi', 'Sx', 'Sp', 'Oc', 'No', 'Dc'], i = 0, v = n;
+    for (var a = 0; a < 26; a++) for (var b = 0; b < 26; b++) u.push(String.fromCharCode(97 + a, 97 + b));
+    while (v >= 999.5 && i < u.length - 1) { v /= 1000; i++; }
     var s = v >= 100 ? v.toFixed(0) : v >= 10 ? v.toFixed(1) : v.toFixed(2);
     if (s.indexOf('.') >= 0) s = s.replace(/\.?0+$/, '');
     return s + u[i];
   };
+
+  // goals keep going for the whole game: later rewards are "runs" = that many runs' worth of credits
+  (function () {
+    var G = HH.GOALS;
+    function add(id, name, desc, target, reward, prog) { G.push({ id: id, name: name, desc: desc, target: target, reward: reward, prog: prog }); }
+    var buys = function (s) { return s.stats.buys; }, scrap = function (s) { return s.lifetimeScrap; };
+    var kills = function (s) { return s.stats.kills; }, runs = function (s) { return s.runs; };
+    var pre = function (s) { return Object.keys(s.pre).length; }, asc = function (s) { return s.ascensions; };
+    var bosses = function (s) { return s.stats.bosses; }, crates = function (s) { return s.stats.crates; };
+    var drones = function (s) { return s.stats.drones; };
+    var steps = [
+      ['b', 30], ['k', 300], ['s', 1e6], ['r', 15], ['b', 50], ['a', 2], ['c', 40], ['k', 1000], ['b', 80], ['s', 1e7],
+      ['p', 10], ['d', 40], ['r', 40], ['b', 120], ['a', 3], ['o', 8], ['k', 3000], ['s', 1e8], ['b', 170], ['p', 18],
+      ['a', 5], ['c', 120], ['r', 80], ['b', 230], ['s', 1e9], ['k', 10000], ['d', 120], ['o', 25], ['a', 8], ['b', 300],
+      ['p', 30], ['s', 1e10], ['r', 150], ['b', 400], ['k', 30000], ['a', 12], ['c', 400], ['b', 520], ['s', 1e11],
+      ['p', 45], ['o', 80], ['a', 20], ['b', 660], ['k', 100000], ['s', 1e12], ['r', 300], ['b', 820], ['p', 60],
+      ['a', 30], ['b', 1000], ['s', 1e14], ['k', 1000000]
+    ];
+    steps.forEach(function (st, i) {
+      var k = st[0], n = st[1], id = 'g_x' + i, w = 1.5 + (i % 3) * 0.75;
+      if (k === 'b') add(id, 'Upgrade Run ' + n, 'Buy ' + n + ' upgrade levels in total.', n, { runs: w }, buys);
+      else if (k === 'k') add(id, 'Rock Breaker ' + HH.fmt(n), 'Destroy ' + HH.fmt(n) + ' targets.', n, { runs: w }, kills);
+      else if (k === 's') add(id, 'Hauler ' + HH.fmt(n), 'Haul ' + HH.fmt(n) + ' scrap in total.', n, { runs: w + 1 }, scrap);
+      else if (k === 'r') add(id, 'Frequent Flyer ' + n, 'Fly ' + n + ' runs.', n, { runs: w }, runs);
+      else if (k === 'p') add(id, 'Star Chart ' + n, 'Own ' + n + ' prestige nodes.', n, { marks: Math.max(5, n) }, pre);
+      else if (k === 'a') add(id, 'Ascension ' + n, 'Ascend ' + n + ' times.', n, { marks: n * 5 }, asc);
+      else if (k === 'c') add(id, 'Cargo Baron ' + n, 'Crack open ' + n + ' cargo crates.', n, { runs: w }, crates);
+      else if (k === 'd') add(id, 'Drone Hunter ' + n, 'Pop ' + n + ' scavenger drones.', n, { runs: w }, drones);
+      else add(id, 'Giant Hunter ' + n, 'Break ' + n + ' mini-bosses.', n, { runs: w }, bosses);
+    });
+  })();
+
 })();

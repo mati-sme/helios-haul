@@ -12,7 +12,55 @@
     return Math.floor(sec / 60) + ':' + ('0' + (sec % 60)).slice(-2);
   }
 
-  var trees = {}, treeInit = {}, sheet = null, activeTab = 'home';
+  var trees = {}, treeInit = {}, sheet = null, activeTab = 'home', buyMode = '1';
+  var shownCredits = null, questSeen = 0, lastRankShown = 0;
+
+  /* ---------- feedback: haptics, floating numbers, celebrations ---------- */
+  function buzz(p) {
+    try { if (Save.data.settings.haptics && navigator.vibrate) navigator.vibrate(p); } catch (e) { /* unsupported */ }
+  }
+  function pop(txt, x, y, cls) {
+    var host = $('fx'), el = document.createElement('div');
+    el.className = 'pop' + (cls ? ' ' + cls : '');
+    el.textContent = txt;
+    el.style.left = x + 'px'; el.style.top = y + 'px';
+    host.appendChild(el);
+    setTimeout(function () { if (el.parentNode) el.parentNode.removeChild(el); }, 1150);
+  }
+  function popAt(node, txt, cls) {
+    var r = node && node.getBoundingClientRect ? node.getBoundingClientRect() : { left: innerWidth / 2, top: innerHeight / 2, width: 0, height: 0 };
+    pop(txt, r.left + r.width / 2, r.top + r.height / 2, cls);
+  }
+  // at most 2 banners visible; extras wait their turn so they never stack on top of each other
+  var celeQ = [];
+  function celeShow(title, sub, cls) {
+    var host = $('cele'), el = document.createElement('div');
+    el.className = 'c' + (cls ? ' ' + cls : '');
+    el.innerHTML = esc(title) + (sub ? '<small>' + esc(sub) + '</small>' : '');
+    host.appendChild(el);
+    var fl = document.createElement('div');
+    fl.className = 'flash';
+    document.body.appendChild(fl);
+    setTimeout(function () {
+      if (el.parentNode) el.parentNode.removeChild(el);
+      if (fl.parentNode) fl.parentNode.removeChild(fl);
+      if (celeQ.length) celeShow.apply(null, celeQ.shift());
+    }, 1950);
+  }
+  function celebrate(title, sub, cls) {
+    if ($('cele').childNodes.length >= 2) { if (celeQ.length < 4) celeQ.push([title, sub, cls]); }
+    else celeShow(title, sub, cls);
+  }
+  // number that counts up instead of jumping
+  function countUp(el, to, ms, prefix, done) {
+    var t0 = performance.now(), last = -1;
+    function step(now) {
+      var k = Math.min(1, (now - t0) / ms), e = 1 - Math.pow(1 - k, 3), v = Math.floor(to * e);
+      if (v !== last) { el.textContent = (prefix || '') + HH.fmt(v); last = v; if (k < 1 && (last % 3 === 0)) Audio.tickUp(); }
+      if (k < 1) requestAnimationFrame(step); else { el.textContent = (prefix || '') + HH.fmt(to); if (done) done(); }
+    }
+    requestAnimationFrame(step);
+  }
 
   /* ---------- toast ---------- */
   var toastT = 0;
@@ -43,6 +91,7 @@
     $('btn-mute').textContent = st.mute ? '🔇' : '🔊';
     $('hud').style.setProperty('--hud', HH.HUDS[Meta.hud()].c);
     $('set-kids').checked = st.kids;
+    $('set-haptics').checked = st.haptics !== false;
     $('set-sound').checked = !st.mute;
     $('set-music').checked = st.music;
     $('set-vol').value = Math.round(st.vol * 100);
@@ -60,10 +109,11 @@
     // goal
     var g = Meta.currentGoal(), body = $('goal-body');
     if (!g) {
-      body.innerHTML = '<div class="goal-name">All goals complete ✦</div><p class="muted">Keep climbing the Prestige map. Those late stars take hours.</p>';
+      body.innerHTML = '<div class="goal-name">All goals complete ✦</div><p class="muted">Keep climbing: new quests and ranks never stop.</p>';
     } else {
       var cur = Meta.goalProgress(g), ready = Meta.goalReady(g);
-      var rw = g.reward.credits ? HH.fmt(g.reward.credits) + ' ◆ credits' : g.reward.marks + ' ☀ Solar Marks';
+      var gr = Meta.goalReward(g);
+      var rw = gr.credits ? HH.fmt(gr.credits) + ' ◆ credits' : gr.marks + ' ☀ Solar Marks';
       body.innerHTML = '<div class="goal-name">' + esc(g.name) + '</div><div class="muted">' + esc(g.desc) + '</div>' +
         '<div class="meter"><i style="width:' + (cur / g.target * 100) + '%"></i></div>' +
         '<div class="goal-meta"><span>' + HH.fmt(cur) + ' / ' + HH.fmt(g.target) + '</span><span>Reward: ' + rw + '</span></div>' +
@@ -71,9 +121,18 @@
       var cb = $('btn-claim');
       if (cb) cb.onclick = function () {
         var done = Meta.claimGoal();
-        if (done) { Audio.buy(); toast('Goal complete: ' + done.name); refreshAll(); }
+        if (done) {
+          var rwd = Meta.goalReward(done);
+          Audio.quest(); buzz([30, 30, 60]);
+          popAt(cb, rwd.credits ? '+' + HH.fmt(rwd.credits) + ' ◆' : '+' + rwd.marks + ' ☀');
+          celebrate('GOAL COMPLETE', done.name);
+          refreshAll();
+        }
       };
     }
+
+    renderQuests();
+    renderAscChip();
 
     // loadout chips
     var S = Meta.stats();
@@ -104,9 +163,64 @@
     $('stats-grid').innerHTML = rows.map(function (r) { return '<div class="stat"><small>' + r[0] + '</small><b>' + r[1] + '</b></div>'; }).join('');
   }
 
+  function renderQuests() {
+    var host = $('quest-list'), qs = Meta.quests();
+    host.innerHTML = '';
+    qs.forEach(function (q, i) {
+      var el = document.createElement('div');
+      el.className = 'quest' + (q.ready ? ' ready' : '');
+      el.innerHTML = '<div class="qn">' + esc(q.name) + '</div><div class="meter"><i style="width:' + (q.prog / q.target * 100) + '%"></i></div>' +
+        '<div class="qm"><span>' + HH.fmt(q.prog) + ' / ' + HH.fmt(q.target) + '</span><span>Reward: ' + HH.fmt(q.reward) + ' ◆</span></div>';
+      if (q.ready) {
+        var b = document.createElement('button');
+        b.className = 'btn gold';
+        b.textContent = 'CLAIM +' + HH.fmt(q.reward) + ' ◆';
+        b.onclick = function () {
+          var r = Meta.claimQuest(i);
+          if (!r) return;
+          Audio.quest(); buzz([25, 30, 25, 30, 60]);
+          popAt(b, '+' + HH.fmt(r.credits) + ' ◆');
+          refreshAll();
+        };
+        el.appendChild(b);
+      }
+      host.appendChild(el);
+    });
+  }
+
+  function renderAscChip() {
+    var chip = $('asc-chip');
+    if (!Meta.anchorBuilt()) { chip.hidden = true; return; }
+    var a = Meta.ascendAdvice();
+    chip.hidden = false;
+    chip.classList.toggle('rec', a.recommended);
+    chip.innerHTML = (a.recommended ? '☀ <b>Ascend now:</b> ' : 'Next ascension: ') + '<b>+' + HH.fmt(a.gain) + ' ☀</b> → <b>+' + a.incomePct + '% income</b>';
+  }
+
   function renderWallet() {
-    $('w-credits').textContent = HH.fmt(Save.data.credits);
+    if (shownCredits === null) shownCredits = Save.data.credits;
+    $('w-credits').textContent = HH.fmt(shownCredits);
     $('w-marks').textContent = HH.fmt(Save.data.marks);
+    var S = Meta.stats(), rk = $('rank-n');
+    rk.textContent = S.rank;
+    $('rank-bonus').textContent = '+' + Math.round((S.rankMult - 1) * 100) + '% credits';
+    var ir = Meta.idleRate();
+    $('salv-rate').textContent = ir < 10 ? ir.toFixed(1) : HH.fmt(ir);
+    if (S.rank > lastRankShown && lastRankShown >= 0) { var rc = $('rank-chip'); rc.classList.remove('up'); void rc.offsetWidth; rc.classList.add('up'); }
+    lastRankShown = S.rank;
+  }
+
+  function renderBadges() {
+    var n = 0;
+    HH.UPGRADES.forEach(function (u) { if (Meta.nodeState('upg', u).status === 'afford') n++; });
+    var b = $('buy-badge');
+    b.hidden = n === 0 || activeTab === 'upgrades';
+    b.textContent = n > 99 ? '99+' : n;
+    var q = Meta.questsReady() + (Meta.goalReady(Meta.currentGoal()) ? 1 : 0), h = $('home-badge');
+    h.hidden = q === 0 || activeTab === 'home';
+    h.textContent = q;
+    if (Meta.questsReady() > questSeen) { Audio.quest(); buzz([20, 30, 40]); celebrate('QUEST COMPLETE', 'Claim it in the Hangar', 'rank'); }
+    questSeen = Meta.questsReady();
   }
 
   /* ---------- trees ---------- */
@@ -166,25 +280,46 @@
     var cur = kind === 'upg' ? '◆' : '☀';
     $('sh-glyph').style.setProperty('--c', col);
     $('sh-glyph').textContent = glyph;
-    $('sh-branch').textContent = bname + (n.max > 1 ? ' · Level ' + st.level + '/' + n.max : '');
+    var unc = n.max >= HH.UNCAPPED;
+    $('sh-branch').textContent = bname + (n.max > 1 ? ' · Level ' + st.level + (unc ? '' : '/' + n.max) : '');
     $('sh-name').textContent = n.name;
     $('sh-desc').textContent = n.desc;
     $('sh-fx').innerHTML = HH.fxLines(n.fx).map(function (l) { return '<li>' + esc(l) + (n.max > 1 ? ' <small class="muted">per level</small>' : '') + '</li>'; }).join('');
     var table = kind === 'upg' ? Meta.upgById : Meta.preById;
     var miss = n.req.filter(function (r) { return Meta.level(kind, r) <= 0; }).map(function (r) { return table[r].name; });
     $('sh-req').textContent = miss.length ? 'Requires: ' + miss.join(', ') : '';
+    var msEl = $('sh-ms'), mode = $('sh-mode');
+    if (kind === 'upg' && n.ms) {
+      var nm = HH.nextMilestone(st.level), cm = Meta.msMult(n, st.level);
+      msEl.textContent = (cm > 1 ? 'Milestone bonus: ×' + cm + ' · ' : '') + (nm ? 'Next milestone at Lv ' + nm + ': ×2' : 'All milestones reached');
+    } else msEl.textContent = '';
+    mode.classList.toggle('hide', kind !== 'upg' || n.max <= 1);
+    $$('#sh-mode button').forEach(function (b) { b.classList.toggle('on', b.dataset.m === buyMode); });
     var btn = $('sh-buy');
     btn.classList.remove('off');
     if (st.status === 'maxed') { btn.textContent = n.max > 1 ? 'Maxed' : 'Owned ✓'; btn.classList.add('off'); }
     else if (st.status === 'locked') { btn.textContent = 'Locked'; btn.classList.add('off'); }
-    else if (st.status === 'afford') btn.textContent = 'Buy · ' + HH.fmt(st.cost) + ' ' + cur;
-    else { btn.textContent = HH.fmt(st.cost) + ' ' + cur + ' · need ' + HH.fmt(st.cost - Meta.funds(kind)) + ' more'; btn.classList.add('off'); }
+    else if (st.status === 'afford') {
+      var want = kind !== 'upg' ? 1 : buyMode === 'max' ? Infinity : +buyMode, c = Meta.affordCount(kind, n, want);
+      btn.textContent = 'Buy' + (c > 1 ? ' ×' + c : '') + ' · ' + HH.fmt(Meta.costN(kind, n, c)) + ' ' + cur;
+    } else { btn.textContent = HH.fmt(st.cost) + ' ' + cur + ' · need ' + HH.fmt(st.cost - Meta.funds(kind)) + ' more'; btn.classList.add('off'); }
   }
 
   function buySheet() {
     if (!sheet) return;
-    var res = Meta.buy(sheet.kind, sheet.node.id);
-    if (res.ok) { Audio.buy(); toast(res.msg); } else { Audio.deny(); toast(res.msg); }
+    var node = sheet.node, kind = sheet.kind;
+    var want = kind !== 'upg' ? 1 : buyMode === 'max' ? Infinity : +buyMode;
+    var res = Meta.buy(kind, node.id, want);
+    if (res.ok) {
+      Audio.buy(); buzz(14);
+      popAt($('sh-buy'), kind === 'upg' ? '+' + res.bought + ' Lv' : 'Acquired!', 'cy');
+      var el = trees[kind === 'upg' ? 'upg' : 'pre'].els[node.id];
+      if (el) { el.classList.remove('bump'); void el.offsetWidth; el.classList.add('bump'); }
+      if (res.milestone) { Audio.milestone(); buzz([30, 40, 30]); celebrate('MILESTONE · Lv ' + res.milestone, node.name + ' effect ×2'); }
+      if (res.rankUp) { Audio.rank(); buzz([20, 30, 20, 30, 80]); celebrate('FLEET RANK ' + res.rankUp, '+' + Math.round(Meta.stats().rankBonusEach * 100) + '% credits every rank', 'rank'); }
+      if (res.unlocked.length) { Audio.unlock(); toast('New node: ' + res.unlocked.slice(0, 2).join(', ')); }
+      else toast(res.msg);
+    } else { Audio.deny(); buzz(40); toast(res.msg); }
     refreshAll();
   }
 
@@ -196,10 +331,12 @@
       btn.classList.add('off'); btn.textContent = 'LOCKED';
       return;
     }
-    var gain = Meta.marksPreview();
-    txt.innerHTML = 'Ascend now for <b style="color:var(--gold)">+' + HH.fmt(gain) + ' ☀</b>. Resets upgrades &amp; credits; keeps prestige &amp; pets.';
+    var a = Meta.ascendAdvice(), gain = a.gain;
+    txt.innerHTML = (a.recommended ? '<b style="color:var(--gold)">Recommended!</b> ' : '') + 'Next ascension: <b style="color:var(--gold)">+' + HH.fmt(gain) +
+      ' ☀</b> → <b style="color:var(--gold)">+' + a.incomePct + '% income</b>. Keeps prestige, pets &amp; a share of your haul.';
     btn.textContent = 'ASCEND';
     btn.classList.toggle('off', gain < 1);
+    $('asc-bar').classList.toggle('rec', a.recommended);
   }
 
   /* ---------- pets ---------- */
@@ -245,6 +382,7 @@
     renderHome();
     renderAscend();
     renderPets();
+    renderBadges();
     if (trees.upg) { trees.upg.refresh(); trees.pre.refresh(); }
     fillSheet();
     applySettings();
@@ -298,12 +436,27 @@
       ['Targets', sum.kills], ['Crates', sum.crates], ['Drones', sum.drones], ['Mini-bosses', sum.bosses]
     ];
     $('sum-grid').innerHTML = rows.map(function (r) { return '<div class="stat"><small>' + r[0] + '</small><b>' + r[1] + '</b></div>'; }).join('');
-    $('sum-credits').textContent = '+' + HH.fmt(sum.credits);
+    $('sum-credits').textContent = '+0';
+    $('sum-best').hidden = !sum.best;
+    var vs = $('sum-vs');
+    if (sum.vsLast != null) {
+      var pc = Math.round(sum.vsLast * 100);
+      vs.hidden = false; vs.className = 'tag ' + (pc >= 0 ? 'up' : 'down');
+      vs.textContent = (pc >= 0 ? '+' : '') + pc + '% vs last run';
+    } else vs.hidden = true;
+    var n = 0;
+    HH.UPGRADES.forEach(function (u) { if (Meta.nodeState('upg', u).status === 'afford') n++; });
+    var af = $('sum-afford'), qr = Meta.questsReady();
+    af.hidden = n === 0 && qr === 0;
+    af.textContent = [n ? n + ' upgrade' + (n > 1 ? 's' : '') + ' ready!' : '', qr ? qr + ' quest' + (qr > 1 ? 's' : '') + ' to claim!' : ''].filter(Boolean).join(' · ');
     var notes = [];
-    if (sum.best) notes.push('New best haul!');
     if (Meta.goalReady(Meta.currentGoal())) notes.push('A goal is ready to claim in the Hangar.');
+    if (Meta.ascendAdvice().recommended) notes.push('Ascension is recommended!');
     $('sum-note').textContent = notes.join(' ');
     $('summary').hidden = false;
+    countUp($('sum-credits'), sum.credits, 900, '+', function () { buzz(sum.best ? [30, 40, 60] : 20); });
+    if (sum.best) Audio.milestone();
+    shownCredits = Save.data.credits - sum.credits;
     renderWallet();
   }
 
@@ -377,6 +530,9 @@
     $('btn-mute').onclick = function () {
       Save.data.settings.mute = !Save.data.settings.mute; Save.save(); applySettings(); Audio.unlock();
     };
+    $$('#sh-mode button').forEach(function (b) { b.onclick = function () { buyMode = b.dataset.m; Audio.click(); fillSheet(); }; });
+    $('asc-chip').onclick = function () { Audio.click(); showTab('prestige'); };
+    $('set-haptics').onchange = function () { st().haptics = this.checked; Save.save(); if (this.checked) buzz(20); };
     $('sh-close').onclick = closeSheet;
     $('sh-buy').onclick = buySheet;
     $('sheet').addEventListener('pointerdown', function (e) { if (e.target === $('sheet')) closeSheet(); });
@@ -387,7 +543,9 @@
       if (gain < 1) { Audio.deny(); toast('Earn a bit more before ascending.'); return; }
       confirmBox('Ascend?', 'Gain ' + HH.fmt(gain) + ' Solar Marks. Upgrades and credits reset (minus what your prestige nodes keep). Prestige nodes and pets stay.', 'Ascend', function () {
         var g = Meta.ascend();
-        Audio.ascend(); toast('Ascended! +' + HH.fmt(g) + ' Solar Marks');
+        Audio.ascend(); buzz([40, 40, 40, 40, 120]);
+        celebrate('ASCENDED', '+' + HH.fmt(g) + ' Solar Marks · +' + Meta.ascendAdvice().bonusPct + '% income', 'rank');
+        shownCredits = null;
         refreshAll();
       });
     };
@@ -441,7 +599,10 @@
       });
     };
 
-    document.addEventListener('visibilitychange', function () { if (document.hidden && Game.state === 'run') setPaused(true); });
+    document.addEventListener('visibilitychange', function () {
+      if (document.hidden) { if (Game.state === 'run') setPaused(true); Save.save(); }
+    });
+    window.addEventListener('pagehide', function () { Save.save(); });
     window.addEventListener('resize', function () { Render.resize(); });
     window.addEventListener('orientationchange', function () { setTimeout(Render.resize, 200); });
     window.addEventListener('keydown', function (e) {
@@ -455,7 +616,15 @@
   }
 
   /* ---------- loop ---------- */
-  var last = 0, clock = 0;
+  var last = 0, clock = 0, idleAcc = 0;
+  function rollCredits(dt) {
+    var target = Save.data.credits;
+    if (shownCredits === null) shownCredits = target;
+    if (shownCredits === target) return;
+    var d = target - shownCredits;
+    shownCredits = Math.abs(d) < 1 ? target : shownCredits + d * Math.min(1, dt * 9);
+    $('w-credits').textContent = HH.fmt(shownCredits);
+  }
   function frame(now) {
     var dt = Math.min(0.05, (now - last) / 1000 || 0.016);
     last = now; clock += dt;
@@ -469,8 +638,42 @@
       }
     } else {
       Render.hangar(clock);
+      if (Game.state === 'hangar' && !document.hidden && $('away').hidden && $('gift').hidden) {
+        Meta.tickIdle(dt);
+        idleAcc += dt;
+        if (idleAcc > 5) { idleAcc = 0; Save.save(); renderBadges(); }
+      }
+      if (!$('app').hidden) rollCredits(dt);
     }
     requestAnimationFrame(frame);
+  }
+
+  /* ---------- welcome back / migration gift ---------- */
+  function showPopups() {
+    var s = Save.data;
+    function away() {
+      if (s.pendingOffline < 1) return;
+      var secs = Math.round(s.pendingAway), h = Math.floor(secs / 3600), m = Math.floor(secs % 3600 / 60);
+      $('away-time').textContent = 'Away for ' + (h ? h + 'h ' : '') + m + 'm · salvage drones kept working' + (secs >= Meta.offlineCapSeconds() - 1 ? ' (storage full)' : '');
+      $('away').hidden = false;
+      var amt = Math.floor(s.pendingOffline);
+      countUp($('away-amt'), amt, 1600, '+');
+      $('away-claim').onclick = function () {
+        var got = Meta.collectOffline();
+        $('away').hidden = true;
+        Audio.unlock(); Audio.claim(); buzz([30, 40, 30, 40, 90]);
+        popAt($('w-credits'), '+' + HH.fmt(got) + ' ◆');
+        refreshAll();
+      };
+    }
+    if (s.gift) {
+      var g = s.gift;
+      $('gift-credits').textContent = '+' + HH.fmt(g.credits);
+      $('gift-marks').textContent = '+' + HH.fmt(g.marks);
+      $('gift-marks-row').hidden = !g.marks;
+      $('gift').hidden = false;
+      $('gift-ok').onclick = function () { s.gift = null; Save.save(); $('gift').hidden = true; Audio.unlock(); Audio.claim(); refreshAll(); away(); };
+    } else away();
   }
 
   /* ---------- boot ---------- */
@@ -478,6 +681,9 @@
     Save.load();
     Meta.dirty();
     Meta.stats();
+    Meta.checkAway(Date.now());
+    shownCredits = Save.data.credits;
+    questSeen = Meta.questsReady();
     $('ver').textContent = HH.VERSION;
     Render.init($('stage'));
     Input.attach($('stage'));
@@ -485,6 +691,7 @@
     bind();
     applySettings();
     showTab('home');
+    showPopups();
     if ('serviceWorker' in navigator && /^https?:$/.test(location.protocol)) {
       navigator.serviceWorker.register('sw.js').catch(function () { /* offline cache is optional */ });
     }

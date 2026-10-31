@@ -44,6 +44,10 @@
         <div class="chip sun" title="Solar Marks"><span class="ic">☀</span><b id="w-marks">0</b></div>
       </div>
     </header>
+    <div class="subbar">
+      <div class="rank" id="rank-chip" title="Fleet Rank: every 10 upgrade levels raises your rank and your credits"><span>RANK</span><b id="rank-n">0</b><small id="rank-bonus"></small></div>
+      <div class="salv" id="salv-chip"><span>◆</span><b id="salv-rate">0</b>/s salvage</div>
+    </div>
 
     <main class="panels">
       <!-- HOME -->
@@ -55,6 +59,13 @@
             <p class="muted">Fly out, blast rocks, scoop scrap, cash out. Then upgrade and do it bigger.</p>
             <button id="btn-launch" class="btn big primary">LAUNCH RUN</button>
             <div id="last-run" class="lastrun muted"></div>
+          </div>
+
+          <button id="asc-chip" class="ascchip" hidden></button>
+
+          <div class="card" id="quest-card">
+            <div class="eyebrow">Quests</div>
+            <div id="quest-list" class="quests"></div>
           </div>
 
           <div class="card" id="goal-card">
@@ -93,7 +104,7 @@
       <!-- PRESTIGE -->
       <section id="tab-prestige" class="tab" data-tab="prestige">
         <div id="pre-tree" class="tree-host" tabindex="0" aria-label="Prestige map"></div>
-        <div class="asc-bar">
+        <div class="asc-bar" id="asc-bar">
           <div class="asc-info">
             <div class="eyebrow">Ascension</div>
             <div id="asc-text" class="asc-text"></div>
@@ -126,6 +137,7 @@
           <div class="card">
             <div class="eyebrow">Play</div>
             <label class="row"><span><b>Kids Mode</b><small>Longer 3:00 timer, slower enemy shots, bigger magnet.</small></span><input type="checkbox" id="set-kids" class="switch"></label>
+            <label class="row"><span><b>Haptics</b><small>Short vibration on rewards (where the device supports it).</small></span><input type="checkbox" id="set-haptics" class="switch"></label>
             <div class="row col"><span><b>Joystick side</b><small>The invisible stick appears wherever you touch in this area.</small></span>
               <div class="seg" id="set-side"><button data-v="left">Bottom-left</button><button data-v="right">Bottom-right</button></div>
             </div>
@@ -160,8 +172,8 @@
     </main>
 
     <nav class="tabbar" id="tabbar">
-      <button data-go="home" class="on"><span>⌂</span>Home</button>
-      <button data-go="upgrades"><span>⬢</span>Upgrades</button>
+      <button data-go="home" class="on"><span>⌂</span>Home<i id="home-badge" class="badge" hidden>0</i></button>
+      <button data-go="upgrades"><span>⬢</span>Upgrades<i id="buy-badge" class="badge" hidden>0</i></button>
       <button data-go="prestige"><span>☀</span>Prestige</button>
       <button data-go="pets"><span>❖</span>Pets</button>
       <button data-go="settings"><span>⚙</span>Settings</button>
@@ -177,7 +189,11 @@
       </div>
       <p id="sh-desc" class="muted"></p>
       <ul id="sh-fx" class="fxlist"></ul>
+      <div id="sh-ms" class="msline"></div>
       <div id="sh-req" class="req"></div>
+      <div id="sh-mode" class="seg buymode">
+        <button data-m="1" class="on">×1</button><button data-m="10">×10</button><button data-m="max">Max</button>
+      </div>
       <div class="sheet-btns">
         <button id="sh-close" class="btn">Close</button>
         <button id="sh-buy" class="btn primary"></button>
@@ -202,6 +218,8 @@
       <h2 id="sum-title">Run complete</h2>
       <div class="sum-grid" id="sum-grid"></div>
       <div class="sum-credits"><span>Credits earned</span><b id="sum-credits">0</b></div>
+      <div class="sum-tags"><span id="sum-best" class="tag gold" hidden>NEW BEST</span><span id="sum-vs" class="tag" hidden></span></div>
+      <div id="sum-afford" class="sum-afford" hidden></div>
       <div id="sum-note" class="muted"></div>
       <div class="btnrow">
         <button id="sum-again" class="btn primary big">Fly again</button>
@@ -209,6 +227,33 @@
       </div>
     </div>
   </div>
+
+  <!-- welcome back -->
+  <div id="away" class="overlay" hidden>
+    <div class="modal">
+      <div class="eyebrow">Welcome back, Captain</div>
+      <h2>While you were away</h2>
+      <p id="away-time" class="muted"></p>
+      <div class="sum-credits"><span>Salvage hauled</span><b id="away-amt">+0</b></div>
+      <button id="away-claim" class="btn big gold">CLAIM</button>
+    </div>
+  </div>
+
+  <!-- upgrade gift (v1 -> v2 migration) -->
+  <div id="gift" class="overlay" hidden>
+    <div class="modal">
+      <div class="eyebrow">Helios Haul 2.0</div>
+      <h2>Upgrade bonus</h2>
+      <p class="muted">Your whole fleet came with you. The economy was rebuilt, so here is a thank-you gift to keep you ahead of the new curve.</p>
+      <div class="sum-credits"><span>Credits</span><b id="gift-credits">+0</b></div>
+      <div class="sum-credits" id="gift-marks-row"><span>Solar Marks</span><b id="gift-marks">+0</b></div>
+      <button id="gift-ok" class="btn big primary">Let's fly</button>
+    </div>
+  </div>
+
+  <!-- celebration flash + floating numbers -->
+  <div id="cele" class="cele" aria-live="polite"></div>
+  <div id="fx" class="fx"></div>
 
   <!-- confirm -->
   <div id="confirm" class="overlay" hidden>
@@ -230,6 +275,7 @@
   <script src="js/input.js"></script>
   <script src="js/tree.js"></script>
   <script src="js/game.js"></script>
+  <script src="js/economy.js"></script>
   <script src="js/render.js"></script>
   <script src="js/main.js"></script>
 </body>

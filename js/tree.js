@@ -206,7 +206,7 @@
       var el = self.els[n.id];
       el.className = 'tnode s-' + st.status + (self.selected === n.id ? ' sel' : '');
       var lv = el.querySelector('.lv');
-      lv.textContent = n.max > 1 ? st.level + '/' + n.max : (st.level ? '✓' : '');
+      lv.textContent = n.max >= HH.UNCAPPED ? (st.level ? 'Lv ' + st.level : '') : n.max > 1 ? st.level + '/' + n.max : (st.level ? '✓' : '');
     });
     this.edges.forEach(function (e) {
       var open = !e.from || self.opts.state(e.from).level > 0;

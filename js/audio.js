@@ -124,6 +124,12 @@
     deny: function () { tone(150, 0.14, 'square', 0.07, 100); },
     launch: function () { tone(120, 0.6, 'sawtooth', 0.09, 520); noise(0.5, 0.18, 1400); },
     win: function () { [523, 659, 784, 1046].forEach(function (f, i) { tone(f, 0.22, 'triangle', 0.1, null, i * 0.11); }); },
+    rank: function () { [392, 523, 659, 784, 1046].forEach(function (f, i) { tone(f, 0.18, 'triangle', 0.1, null, i * 0.07); tone(f * 2, 0.12, 'sine', 0.04, null, i * 0.07); }); },
+    milestone: function () { tone(660, 0.1, 'square', 0.06); tone(990, 0.1, 'square', 0.06, null, 0.08); tone(1320, 0.28, 'triangle', 0.1, null, 0.16); },
+    quest: function () { [587, 740, 880, 1175].forEach(function (f, i) { tone(f, 0.16, 'sine', 0.1, null, i * 0.08); }); },
+    unlock: function () { tone(880, 0.12, 'sine', 0.08); tone(1175, 0.2, 'sine', 0.08, null, 0.09); },
+    claim: function () { var i; for (i = 0; i < 8; i++) tone(520 * Math.pow(2, i / 6), 0.07, 'triangle', 0.07, null, i * 0.045); tone(1568, 0.3, 'sine', 0.09, null, 0.4); },
+    tickUp: function () { tone(900 + Math.random() * 200, 0.025, 'square', 0.025); },
     ascend: function () { [262, 330, 392, 523, 659, 784, 1046].forEach(function (f, i) { tone(f, 0.4, 'sine', 0.1, null, i * 0.09); }); }
   };
 })();

@@ -14,12 +14,18 @@
   var NUM_KEYS = ['damage', 'fireRate', 'multishot', 'pierce', 'hull', 'shield', 'shieldRegen', 'regen', 'thrust',
     'magnet', 'luck', 'scrapValue', 'oreChance', 'runTime', 'creditMult', 'scrapMult', 'droneValue', 'bossValue',
     'oreMult', 'tierValue', 'petSlots', 'petAura', 'spawn', 'droneRate', 'crateRate', 'bossChance', 'startCredits',
-    'keepCredits', 'marksMult', 'kidsBonus', 'compass', 'scanner', 'anchor'];
+    'keepCredits', 'marksMult', 'kidsBonus', 'compass', 'scanner', 'anchor', 'salvage', 'idleMult', 'offlineHours'];
   var LIST_KEYS = ['weaponMode', 'trail', 'hud', 'pet', 'unlock'];
 
   var upgById = {}, preById = {};
   HH.UPGRADES.forEach(function (n) { upgById[n.id] = n; });
   HH.PRESTIGE.forEach(function (n) { preById[n.id] = n; });
+  var E = HH.ECON;
+  // milestone doubling only applies to scalable effects on nodes that can actually reach Lv 10
+  HH.UPGRADES.forEach(function (n) {
+    n.ms = n.max >= 10 && Object.keys(n.fx).some(function (k) { return HH.MS_KEYS.indexOf(k) >= 0; });
+  });
+  function msMult(n, lv) { return n.ms ? Math.pow(2, HH.msCount(lv)) : 1; }
 
   var cache = null;
 
@@ -40,14 +46,28 @@
           else if (L[k] && L[k].indexOf(fx[k]) < 0) L[k].push(fx[k]);
         }
       }
-      HH.UPGRADES.forEach(function (n) { var lv = s.upg[n.id] || 0; if (lv) add(n.fx, lv); });
+      HH.UPGRADES.forEach(function (n) { var lv = s.upg[n.id] || 0; if (lv) add(n.fx, lv * msMult(n, lv)); });
       HH.PRESTIGE.forEach(function (n) { if (s.pre[n.id]) add(n.fx, 1); });
       S.lists = L;
       L.pet.forEach(function (p) { if (s.petsOwned.indexOf(p) < 0) s.petsOwned.push(p); });
       S.levels = Meta.totalLevels();
+      ['scrapValue', 'scrapMult', 'creditMult', 'tierValue', 'oreMult', 'droneValue', 'bossValue', 'idleMult'].forEach(function (k) { S[k] *= E.fxK; });
+      S.rank = Math.floor(S.levels / E.rankStep);
+      S.rankBonusEach = E.rankBonus;
+      S.rankMult = 1 + E.rankBonus * S.rank;
+      S.markMult = Meta.markMultFor(s.marksLifetime);
+      // scrap value, scrap collected and cash-out bonuses pool into ONE additive bonus (keeps income growth tame)
+      S.pool = 1 + S.scrapValue + S.scrapMult + S.creditMult;
+      S.vscale = Math.pow(1 + s.ascSpent / E.valS0, E.valGamma);
+      // income proxy for this ascension (no marks/rank): upgrade prices follow it so pacing stays steady at any scale
+      S.W = S.vscale * S.pool * Math.pow(S.markMult, E.costMarks);
+      S.incomeMult = S.rankMult * S.markMult;
       cache = S;
       return S;
     },
+
+    msMult: msMult,
+    markMultFor: function (m) { return 1 + E.markBonus * Math.pow(Math.max(0, m), E.markExp); },
 
     totalLevels: function () {
       var n = 0, id, s = Save.data;
@@ -64,7 +84,35 @@
 
     cost: function (kind, n) {
       var lv = Meta.level(kind, n.id);
-      return Math.round(n.cost * Math.pow(n.costMul, lv));
+      return Meta.costAt(kind, n, lv);
+    },
+
+    // price of the level after `lv` (kind 'upg' only grows; prestige nodes are one-offs)
+    costAt: function (kind, n, lv) {
+      if (kind !== 'upg') return n.cost;
+      if (n.max === 1) return Math.round(n.cost * E.oneOffK);      // one-off unlocks keep a flat price (the anchor must stay reachable)
+      var m = 1 + (n.costMul - 1) * (n.max >= HH.UNCAPPED ? E.costK : 1);
+      var infl = Math.pow(Meta.stats().W, E.costW);
+      return Math.round(n.cost * E.costBase * Math.pow(m, lv) * infl);
+    },
+
+    // cost of buying `count` more levels from the current level
+    costN: function (kind, n, count) {
+      var lv = Meta.level(kind, n.id), tot = 0, i;
+      for (i = 0; i < count; i++) tot += Meta.costAt(kind, n, lv + i);
+      return tot;
+    },
+
+    // how many levels (<= want) the wallet affords right now
+    affordCount: function (kind, n, want) {
+      var lv = Meta.level(kind, n.id), left = Meta.funds(kind), c = 0, cost;
+      want = Math.min(want, n.max - lv);
+      while (c < want) {
+        cost = Meta.costAt(kind, n, lv + c);
+        if (cost > left) break;
+        left -= cost; c++;
+      }
+      return c;
     },
 
     reqMet: function (kind, n) {
@@ -77,56 +125,82 @@
     nodeState: function (kind, n) {
       var lv = Meta.level(kind, n.id), max = n.max;
       var cost = Meta.cost(kind, n), status;
-      if (!Meta.reqMet(kind, n)) status = 'locked';
+      if (!Meta.reqMet(kind, n) && lv <= 0) status = 'locked';
       else if (lv >= max) status = 'maxed';
       else if (Meta.funds(kind) >= cost) status = 'afford';
       else status = lv > 0 ? 'owned' : 'ready';
       return { level: lv, max: max, status: status, cost: cost };
     },
 
-    buy: function (kind, id) {
+    // buy `count` levels (default 1; Infinity = max). Returns {ok, msg, bought, spent, milestone, rankUp, unlocked}
+    buy: function (kind, id, count) {
       var s = Save.data, n = (kind === 'upg' ? upgById : preById)[id];
       if (!n) return { ok: false, msg: 'Unknown node.' };
       var st = Meta.nodeState(kind, n);
       if (st.status === 'locked') return { ok: false, msg: 'Locked: buy the connected node first.' };
       if (st.status === 'maxed') return { ok: false, msg: 'Already maxed.' };
       if (st.status !== 'afford') return { ok: false, msg: 'Not enough ' + (kind === 'upg' ? 'Credits.' : 'Solar Marks.') };
+      var c = kind === 'upg' ? Math.max(1, Meta.affordCount(kind, n, count || 1)) : 1;
+      var spent = Meta.costN(kind, n, c), before = Meta.stats().rank, lvBefore = st.level, wasOpen = {};
+      if (kind === 'upg') HH.UPGRADES.forEach(function (o) { wasOpen[o.id] = Meta.reqMet('upg', o); });
       if (kind === 'upg') {
-        s.credits -= st.cost;
-        s.ascSpent += st.cost;
-        s.upg[id] = st.level + 1;
-        s.stats.buys++;
+        s.credits -= spent;
+        s.ascSpent += spent;
+        s.upg[id] = st.level + c;
+        s.stats.buys += c;
         if (id === 'anchor') s.stats.anchored = 1;
       } else {
-        s.marks -= st.cost;
+        s.marks -= spent;
         s.pre[id] = 1;
       }
       Meta.dirty();
-      Meta.stats();
+      var S = Meta.stats(), res = { ok: true, bought: c, spent: spent, milestone: 0, rankUp: 0, unlocked: [] };
+      if (kind === 'upg') {
+        var m = HH.msCount(st.level + c) - HH.msCount(lvBefore);
+        if (n.ms && m > 0) res.milestone = HH.MILESTONES[HH.msCount(st.level + c) - 1];
+        if (S.rank > before) res.rankUp = S.rank;
+        HH.UPGRADES.forEach(function (o) { if (!wasOpen[o.id] && Meta.reqMet('upg', o) && !s.upg[o.id]) res.unlocked.push(o.name); });
+        if (Meta.questEvent) Meta.questEvent('buy', c);
+      }
+      res.msg = n.name + (n.max > 1 ? ' → Lv ' + (st.level + c) : ' acquired') + '!';
       Save.save();
-      return { ok: true, msg: n.name + (n.max > 1 ? ' → Lv ' + (st.level + 1) : ' acquired') + '!' };
+      return res;
     },
 
     anchorBuilt: function () { return Meta.stats().anchor > 0; },
 
     marksPreview: function () {
       var s = Save.data, S = Meta.stats();
-      var raw = Math.sqrt(s.ascScrap / 300) + Math.sqrt(s.ascSpent / 2000) + S.levels * 0.25 + Object.keys(s.pre).length * 0.3;
-      return Math.floor(raw * (1 + S.marksMult));
+      return Math.floor(Math.pow(Math.max(0, s.ascEarned) / E.markDiv, E.markPow) * (1 + S.marksMult));
     },
 
     canAscend: function () { return Meta.anchorBuilt() && Meta.marksPreview() >= 1; },
 
+    // "Next ascension: +N ☀ → +X% income" and whether the game recommends doing it now
+    ascendAdvice: function () {
+      var s = Save.data, gain = Meta.marksPreview(), life = s.marksLifetime;
+      var cur = Meta.markMultFor(life), nxt = Meta.markMultFor(life + gain);
+      return {
+        gain: gain, can: Meta.canAscend(), incomePct: Math.round((nxt / cur - 1) * 100),
+        bonusPct: Math.round((cur - 1) * 100), newBonusPct: Math.round((nxt - 1) * 100),
+        recommended: Meta.canAscend() && (life <= 0 || gain >= 0.5 * life)
+      };
+    },
+
     ascend: function () {
       if (!Meta.canAscend()) return null;
       var s = Save.data, S = Meta.stats(), gain = Meta.marksPreview();
-      var keep = Math.floor(s.credits * Math.min(1, S.keepCredits));
+      var start = Math.floor(s.credits * Math.min(1, S.keepCredits) + s.ascEarned * E.carryFrac + S.startCredits * Math.max(1, s.ascEarned / 2000));
       s.marks += gain;
+      s.marksLifetime += gain;
       s.ascensions++;
+      s.prevAscEarned = s.ascEarned;
       s.upg = {};
-      s.credits = keep + Math.floor(S.startCredits);
+      s.credits = start;
       s.ascScrap = 0;
       s.ascSpent = 0;
+      s.ascEarned = 0;
+      s.rankSeen = 0;
       Meta.dirty();
       Meta.stats();
       // drop equipped pets the player no longer has slots for
@@ -143,13 +217,20 @@
     },
     goalProgress: function (g) { return Math.min(g.target, Math.floor(g.prog(Save.data))); },
     goalReady: function (g) { return g && g.prog(Save.data) >= g.target; },
+    // resolved reward: {credits, marks}; reward.runs = that many runs' worth of credits
+    goalReward: function (g) {
+      var r = g.reward, out = { credits: r.credits || 0, marks: r.marks || 0 };
+      if (r.runs) out.credits += Math.floor(r.runs * Meta.runWorth());
+      return out;
+    },
     claimGoal: function () {
       var g = Meta.currentGoal();
       if (!g || !Meta.goalReady(g)) return null;
       var s = Save.data;
       s.goalsClaimed[g.id] = 1;
-      if (g.reward.credits) s.credits += g.reward.credits;
-      if (g.reward.marks) s.marks += g.reward.marks;
+      var rw = Meta.goalReward(g);
+      if (rw.credits) s.credits += rw.credits;
+      if (rw.marks) { s.marks += rw.marks; s.marksLifetime += rw.marks; }
       Save.save();
       return g;
     },
@@ -170,7 +251,8 @@
 
     runDuration: function () {
       var S = Meta.stats(), kids = Save.data.settings.kids;
-      return (kids ? 180 + S.kidsBonus : 120) + S.runTime;
+      // diminishing returns keep runs (and so the reward cadence) under ~3:00 however many timer nodes exist
+      return (kids ? 180 + S.kidsBonus : 120) + Math.round(E.timerCap * (1 - Math.exp(-S.runTime / E.timerCap)));
     }
   };
 
@@ -201,20 +283,25 @@
     },
 
     derive: function () {
-      var S = Meta.stats(), kids = Save.data.settings.kids;
-      var pow = 1 + 0.045 * (S.levels + 2 * Object.keys(Save.data.pre).length);
+      var S = Meta.stats(), kids = Save.data.settings.kids, L = S.levels;
+      // enemy HP follows spending only gently (levels, never prestige); value of targets climbs faster, so every
+      // purchase raises income while damage always outgrows HP.
+      var hpScale = Math.pow(1 + E.hpLin * L, E.hpPow);
+      var valueScale = S.vscale;
+      var rate = 2.4 * (1 + S.fireRate);
+      if (rate > 10) rate = 10 + 6 * Math.log(rate / 10);
       return {
-        S: S, kids: kids, pow: pow,
+        S: S, kids: kids, pow: hpScale, hpScale: hpScale, valueScale: valueScale,
         damage: 10 * (1 + S.damage),
-        rate: Math.min(14, 2.4 * (1 + S.fireRate)),
-        multi: Math.min(6, Math.floor(S.multishot)),
-        pierce: Math.min(6, Math.floor(S.pierce)),
-        hull: 60 + S.hull,
+        rate: rate,
+        multi: Math.min(8, Math.floor(S.multishot)),
+        pierce: Math.min(8, Math.floor(S.pierce)),
+        hull: 90 + S.hull,
         shield: S.shield,
-        maxSpeed: 235 * (1 + S.thrust * 0.55),
-        accel: 3.8 * (1 + S.thrust * 0.25),
+        maxSpeed: 235 * (1 + Math.min(S.thrust, 2.2) * 0.55),
+        accel: 3.8 * (1 + Math.min(S.thrust, 4) * 0.25),
         drag: 1.4,
-        magnet: 70 * (1 + S.magnet) * (kids ? 1.5 : 1),
+        magnet: Math.min(620, 130 * (1 + S.magnet)) * (kids ? 1.5 : 1),
         crit: Math.min(0.5, 0.05 + S.luck * 0.4),
         bulletSpeed: 560,
         range: 410,
@@ -233,7 +320,7 @@
         scrap: 0, kills: 0, crates: 0, drones: 0, bosses: 0, gems: 0,
         shake: 0, fireCd: 0.25, novaCd: 1, spawnT: 0, bossN: 0, boss2: false,
         aimA: -Math.PI / 2, lock: null, pend: 0, pendT: 0, lastTick: -1, ended: false, bossAlive: null,
-        gain: 0, comboT: 0
+        gain: 0, comboT: 0, combo: 0
       };
       Game.G = G;
       Game.paused = false;
@@ -258,7 +345,7 @@
     targetCount: function (G) {
       var v = Game.view, p = G.t / G.dur, R = v.rv + 280;
       var n = Math.PI * R * R / 90000 * (1 + 0.3 * p) * (1 + G.S.spawn);
-      return clamp(Math.round(n), 12, 90);
+      return clamp(Math.round(n), 14, 110);
     },
 
     spawnPos: function (G, dist) {
@@ -286,19 +373,19 @@
         e.tier = ti;
         e.r = rnd(T.r[0], T.r[1]);
         e.ore = ti < 2 && Math.random() < 0.05 + G.S.oreChance;
-        e.mhp = T.hp * (1 + 0.7 * prog) * D.pow * (e.ore ? 1.3 : 1) * (e.r / 28);
-        e.val = T.val * D.pow * (1 + 0.3 * prog) * (e.r / 28);
+        e.mhp = T.hp * (1 + 0.7 * prog) * D.hpScale * (e.ore ? 1.3 : 1) * (e.r / 28);
+        e.val = T.val * D.valueScale * (1 + 0.3 * prog) * (e.r / 28);
         var sp = rnd(8, 34), a = rnd(0, 6.28);
         e.vx = Math.cos(a) * sp; e.vy = Math.sin(a) * sp;
         e.verts = Game.makeVerts(e.r);
       } else if (kind === 'crate') {
-        e.r = 20; e.mhp = 14 * (1 + 0.7 * prog) * D.pow; e.val = 20 * D.pow;
+        e.r = 20; e.mhp = 14 * (1 + 0.7 * prog) * D.hpScale; e.val = 20 * D.valueScale;
         var a2 = rnd(0, 6.28); e.vx = Math.cos(a2) * 18; e.vy = Math.sin(a2) * 18;
       } else if (kind === 'drone') {
-        e.r = 17; e.mhp = 30 * (1 + 0.7 * prog) * D.pow; e.val = 14 * D.pow;
+        e.r = 17; e.mhp = 30 * (1 + 0.7 * prog) * D.hpScale; e.val = 14 * D.valueScale;
         e.fire = rnd(1.5, 3); e.orb = Math.random() < 0.5 ? 1 : -1; e.rv = 0;
       } else if (kind === 'boss') {
-        e.r = 64; e.mhp = 520 * (1 + 0.5 * prog) * D.pow; e.val = 150 * D.pow;
+        e.r = 64; e.mhp = 520 * (1 + 0.5 * prog) * D.hpScale; e.val = 150 * D.valueScale;
         e.ring = 3.5; e.rv = 0.25; e.verts = Game.makeVerts(64);
       }
       e.hp = e.mhp;
@@ -332,7 +419,7 @@
       var s = G.ship;
       if (s.inv > 0 || G.ended) return;
       if (G.kids) dmg *= 0.7;
-      s.sinceHit = 0; s.inv = 0.6;
+      s.sinceHit = 0; s.inv = 0.85;
       if (s.sh > 0) {
         var a = Math.min(s.sh, dmg);
         s.sh -= a; dmg -= a;
@@ -370,7 +457,7 @@
     kill: function (G, e) {
       if (e.dead) return;
       e.dead = true;
-      var S = G.S, mult = (1 + S.scrapValue) * (1 + S.scrapMult), n;
+      var S = G.S, mult = S.pool, n;
       var big = e.k === 'boss' || e.r > 32;
       if (e.k === 'ast') {
         if (e.ore) mult *= 6 * (1 + S.oreMult);
@@ -393,6 +480,8 @@
         Game.drop(G, e.x, e.y, 0, 'heal', 1);
       }
       G.kills++;
+      G.combo = (G.comboT > 0 ? G.combo : 0) + 1; G.comboT = 1.6;
+      if (G.combo % 8 === 0) { Game.text(G, G.ship.x, G.ship.y - 52, 'x' + G.combo + ' STREAK!', '#7fe8ff', 17); Audio.gem(); }
       var col = e.k === 'ast' ? ['#b8a58f', '#9fb4c8', '#7fe8ff', '#b79cff'][e.tier] : e.k === 'drone' ? '#ff8f6a' : e.k === 'crate' ? '#ffd45e' : '#ffb066';
       if (e.ore) col = '#ffd45e';
       Game.burst(G, e.x, e.y, col, big ? 34 : 16, big ? 260 : 170, big ? 5 : 3.4);
@@ -481,6 +570,7 @@
       s.flash = Math.max(0, s.flash - dt);
       s.sinceHit += dt;
       G.shake = Math.max(0, G.shake - dt * 30);
+      if (G.comboT > 0) G.comboT -= dt;
 
       // --- ship movement (mild momentum) ---
       var inp = Input.vec();
@@ -621,7 +711,7 @@
           var nx = -ex / ed, ny = -ey / ed;   // from ship toward target
           s.vx -= nx * 220; s.vy -= ny * 220;
           e.vx += nx * 60; e.vy += ny * 60;
-          var cd = e.k === 'boss' ? 16 : e.k === 'ast' ? 5 + e.tier * 3 : 6;
+          var cd = e.k === 'boss' ? 14 : e.k === 'ast' ? 4 + e.tier * 2.5 : 5;
           Game.hurtShip(G, cd);
           Game.hurtEnt(G, e, D.damage * 1.5, false);
           s.x -= nx * (cr - ed) * 0.6; s.y -= ny * (cr - ed) * 0.6;
@@ -650,6 +740,10 @@
           var pull = 240 + (mr - pdist) * 6;
           pk.vx += (pdx / pdist * pull - pk.vx) * (1 - Math.exp(-6 * dt));
           pk.vy += (pdy / pdist * pull - pk.vy) * (1 - Math.exp(-6 * dt));
+        } else if (pdist < mr * 2.4 && pk.age > 0.5) {
+          // passive players still collect: loose scrap slowly drifts toward the ship
+          pk.vx += (pdx / pdist * 42 - pk.vx) * (1 - Math.exp(-2 * dt));
+          pk.vy += (pdy / pdist * 42 - pk.vy) * (1 - Math.exp(-2 * dt));
         } else {
           pk.vx *= Math.exp(-2 * dt); pk.vy *= Math.exp(-2 * dt);
         }
@@ -722,10 +816,11 @@
       if (!G || G.ended) return;
       G.ended = true;
       var s = Save.data, S = G.S;
-      var credits = Math.floor(G.scrap * (1 + S.creditMult));
+      var credits = Math.floor(G.scrap * S.incomeMult);
       var scrap = Math.floor(G.scrap);
-      var best = scrap > s.bestScrap;
+      var best = scrap > s.bestScrap, prev = s.lastRun ? s.lastRun.credits : 0;
       s.credits += credits;
+      s.ascEarned += credits;
       s.lifetimeScrap += scrap;
       s.ascScrap += scrap;
       s.runs++;
@@ -735,11 +830,17 @@
       s.stats.drones += G.drones;
       s.stats.bosses += G.bosses;
       if (reason === 'time') s.stats.runsDone++;
+      // salvage tracks the best of the last few runs (normalised to credits per minute)
+      s.recentCpm.push(credits / (Math.max(G.t, 30) / 60));
+      if (s.recentCpm.length > 5) s.recentCpm.shift();
+      s.avgKills = s.avgKills ? s.avgKills * 0.7 + G.kills * 0.3 : G.kills;
       var sum = {
-        reason: reason, scrap: scrap, credits: credits, mult: 1 + S.creditMult, kills: G.kills,
+        reason: reason, scrap: scrap, credits: credits, mult: S.incomeMult, kills: G.kills,
         crates: G.crates, drones: G.drones, bosses: G.bosses, gems: G.gems, best: best,
+        vsLast: prev > 0 ? credits / prev - 1 : null,
         time: Math.min(G.t, G.dur), kids: G.kids
       };
+      if (Meta.questEvent) Meta.questEvent('run', sum);
       s.lastRun = sum;
       Save.save();
       Input.enable(false);

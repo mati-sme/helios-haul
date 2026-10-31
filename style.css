@@ -186,7 +186,7 @@ textarea { width: 100%; margin-top: 12px; border-radius: 12px; border: 1px solid
 .sum-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; text-align: left; }
 .sum-credits { display: flex; justify-content: space-between; align-items: center; padding: 14px; border-radius: 14px; background: linear-gradient(90deg, rgba(255, 190, 70, 0.18), rgba(255, 190, 70, 0.05)); border: 1px solid rgba(255, 212, 94, 0.4); }
 .sum-credits b { font-size: 30px; color: var(--gold); font-variant-numeric: tabular-nums; }
-.toast { position: fixed; left: 50%; bottom: calc(90px + var(--safe-b)); transform: translate(-50%, 20px); z-index: 40; padding: 12px 18px; border-radius: 14px; background: rgba(8, 20, 44, 0.96); border: 1px solid var(--cyan);
+.toast { position: fixed; left: 50%; top: calc(var(--safe-t) + 56px); transform: translate(-50%, -12px); z-index: 40; padding: 8px 14px; border-radius: 12px; font-size: 13px; background: rgba(8, 20, 44, 0.96); border: 1px solid var(--cyan);
   font-weight: 800; opacity: 0; pointer-events: none; transition: opacity 0.2s, transform 0.2s; max-width: 90vw; text-align: center; }
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
 
@@ -196,4 +196,67 @@ textarea { width: 100%; margin-top: 12px; border-radius: 12px; border: 1px solid
 }
 @media (prefers-reduced-motion: reduce) {
   .tnode.s-afford, .card.launch .btn, .hud .timer.low { animation: none; }
+}
+
+/* ---------- v2: rank, salvage, quests, badges, celebrations ---------- */
+.subbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 0 12px 6px; flex: none; font-size: 12px; }
+.rank { display: flex; align-items: baseline; gap: 6px; color: var(--muted); font-weight: 800; letter-spacing: 0.12em; }
+.rank b { font-size: 16px; color: var(--cyan); letter-spacing: 0; }
+.rank small { color: var(--gold); letter-spacing: 0; font-weight: 700; }
+.rank.up b { animation: rankpop 0.7s ease-out; }
+.salv { color: var(--muted); font-weight: 700; font-variant-numeric: tabular-nums; }
+.salv span { color: var(--gold); }
+.salv b { color: var(--text); }
+@keyframes rankpop { 30% { transform: scale(1.9); color: #fff; text-shadow: 0 0 18px var(--cyan); } }
+
+.badge { position: absolute; top: 6px; left: 50%; margin-left: 10px; min-width: 20px; height: 20px; padding: 0 5px; border-radius: 10px; background: #ff5a7a; color: #fff;
+  font: 800 12px/20px system-ui, sans-serif; font-style: normal; text-align: center; letter-spacing: 0; animation: badgepulse 1.4s infinite; }
+.tabbar button { position: relative; }
+@keyframes badgepulse { 50% { transform: scale(1.18); } }
+
+.ascchip { display: block; width: 100%; max-width: 560px; margin: 0 auto 12px; padding: 12px 14px; border-radius: 16px; text-align: left; font-weight: 800; font-size: 14px;
+  background: rgba(40, 26, 8, 0.8); border: 1px solid rgba(255, 179, 71, 0.35); color: var(--text); }
+.ascchip b { color: var(--gold); }
+.ascchip.rec { border-color: #ffd45e; background: linear-gradient(90deg, rgba(255, 190, 70, 0.28), rgba(40, 26, 8, 0.8)); animation: glow 1.8s infinite; }
+@keyframes glow { 50% { box-shadow: 0 0 26px rgba(255, 190, 70, 0.65); } }
+
+.quests { display: grid; gap: 10px; margin-top: 8px; }
+.quest { padding: 10px 12px; border-radius: 14px; background: rgba(0, 0, 0, 0.28); border: 1px solid var(--line); }
+.quest .qn { font-weight: 800; font-size: 14px; }
+.quest .qm { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); margin-top: 4px; }
+.quest .meter { margin: 8px 0 4px; height: 8px; }
+.quest.ready { border-color: var(--gold); background: linear-gradient(90deg, rgba(255, 190, 70, 0.2), rgba(0, 0, 0, 0.28)); }
+.quest .btn { width: 100%; margin-top: 8px; min-height: 56px; font-size: 17px; animation: pulse 1.6s infinite; }
+
+.msline { font-size: 13px; font-weight: 700; color: var(--gold); margin: 6px 0 0; min-height: 4px; }
+.buymode { margin-top: 8px; }
+.buymode button { min-height: 44px; }
+.buymode.hide { display: none; }
+
+.sum-tags { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
+.tag { padding: 4px 12px; border-radius: 999px; border: 1px solid var(--line); font-weight: 800; font-size: 13px; }
+.tag.gold { background: linear-gradient(180deg, #ffe27a, #ff9d2e); color: #2a1600; border-color: #ffeaa8; animation: pulse 1.4s infinite; }
+.tag.up { color: #7dffb2; border-color: rgba(125, 255, 178, 0.5); }
+.tag.down { color: #ffb0a0; }
+.sum-afford { font-weight: 800; color: var(--cyan); }
+
+.cele { position: fixed; left: 0; right: 0; top: calc(var(--safe-t) + 104px); z-index: 60; display: grid; justify-items: center; gap: 6px; pointer-events: none; }
+.cele .c { padding: 7px 16px; border-radius: 14px; font-weight: 900; letter-spacing: 0.08em; font-size: 16px; text-align: center; max-width: 90vw; pointer-events: none; display: block;
+  background: rgba(8, 18, 40, 0.92); border: 2px solid var(--gold); color: var(--gold); text-shadow: 0 0 14px currentColor; box-shadow: 0 0 40px rgba(255, 200, 80, 0.5);
+  animation: celein 1.9s ease-out forwards; }
+.cele .c small { display: block; margin-top: 2px; font-size: 12px; letter-spacing: 0.04em; color: var(--text); text-shadow: none; }
+.cele .c.rank small { color: var(--text); letter-spacing: 0.04em; font-weight: 400; }
+.cele .c.rank { border-color: var(--cyan); color: var(--cyan); box-shadow: 0 0 40px rgba(95, 243, 255, 0.5); }
+@keyframes celein { 0% { transform: scale(0.5); opacity: 0; } 12% { transform: scale(1.12); opacity: 1; } 22% { transform: scale(1); } 80% { opacity: 1; } 100% { transform: translateY(-30px); opacity: 0; } }
+.flash { position: fixed; inset: 0; z-index: 55; pointer-events: none; background: radial-gradient(circle, rgba(255, 226, 122, 0.45), transparent 70%); animation: flash 0.6s ease-out forwards; }
+@keyframes flash { from { opacity: 1; } to { opacity: 0; } }
+.fx { position: fixed; inset: 0; z-index: 58; pointer-events: none; overflow: hidden; }
+.pop { position: absolute; transform: translate(-50%, 0); font-weight: 900; font-size: 20px; color: var(--gold); text-shadow: 0 0 10px rgba(0, 0, 0, 0.9), 0 0 14px rgba(255, 200, 80, 0.7);
+  animation: popup 1.1s ease-out forwards; white-space: nowrap; }
+.pop.cy { color: var(--cyan); }
+@keyframes popup { from { opacity: 1; margin-top: 0; } to { opacity: 0; margin-top: -70px; } }
+.tnode.bump { animation: bump 0.4s ease-out; }
+@keyframes bump { 40% { transform: scale(1.3); } }
+@media (prefers-reduced-motion: reduce) {
+  .badge, .ascchip.rec, .quest .btn, .tag.gold { animation: none; }
 }
